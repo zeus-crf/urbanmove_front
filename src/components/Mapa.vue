@@ -2,20 +2,26 @@
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { useToast, TYPE } from 'vue-toastification'
 
-// --- Referência do container do mapa ---
 const mapContainer = ref<HTMLDivElement | null>(null)
-let map: L.Map
-let busMarkers: Record<string, L.Marker> = {} // Marcadores por ID
+let map: L.Map | null = null
 let eventSource: EventSource | null = null
-let boundsAjustados = false // controla ajuste inicial do zoom
 
-// --- Helper: cria ícone SVG de ônibus ---
-function createBusSvgIcon(options: { color?: string; size?: number; rotation?: number } = {}) {
-  const color = options.color ?? '#1e90ff'
-  const size = options.size ?? 36
-  const rotation = options.rotation ?? 0
+const toast = useToast()
 
+// 🔵 Armazena markers ativos
+let busMarkersSSE: Record<string, L.Marker> = {}
+
+// 🔵 Rotas ativas (vazio = mostra todos)
+const activeRouteIds = ref<string[]>([])
+const shouldFocusOnFilter = ref(false);
+
+// ======================================
+// Ícone SVG (sempre azul)
+// ======================================
+function createBusSvgIcon() {
+  const size = 36
   const svg = `
     <svg width="${size}" height="${size}" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
       <defs>
@@ -24,115 +30,164 @@ function createBusSvgIcon(options: { color?: string; size?: number; rotation?: n
         </filter>
       </defs>
       <g filter="url(#shadow)">
-        <rect x="8" y="14" width="48" height="28" rx="6" ry="6" fill="${color}" />
+        <rect x="8" y="14" width="48" height="28" rx="6" ry="6" fill="#1e90ff" />
         <rect x="12" y="20" width="12" height="10" rx="1" ry="1" fill="#fff" />
         <rect x="40" y="20" width="12" height="10" rx="1" ry="1" fill="#fff" />
-        <circle cx="22" cy="46" r="4" fill="#333" />
-        <circle cx="42" cy="46" r="4" fill="#333" />
+        <circle cx="22" cy="46" r="4" fill="#000" />
+        <circle cx="42" cy="46" r="4" fill="#000" />
       </g>
     </svg>`
 
-  const html = `<div style="transform: rotate(${rotation}deg); display:flex; align-items:center; justify-content:center; width:${size}px; height:${size}px;">${svg}</div>`
-
   return L.divIcon({
     className: '',
-    html,
+    html: `<div style="display:flex; align-items:center; justify-content:center; width:${size}px; height:${size}px;">${svg}</div>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
     popupAnchor: [0, -size / 2]
   })
 }
 
-const maxInitialMarkers = 50
-
+// ======================================
+// Inicializa mapa + SSE
+// ======================================
 onMounted(() => {
-  console.log('Mapa.vue -> onMounted', mapContainer.value)
+  if (!mapContainer.value) return
 
-  if (!mapContainer.value) {
-    console.error('Erro: container do mapa não encontrado!')
-    return
-  }
-
-  // --- Inicializa mapa ---
   map = L.map(mapContainer.value).setView([-23.02836, -43.56266], 13)
+
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map)
-  console.log('Mapa inicializado:', map)
 
-  // --- Conexão SSE ---
-  eventSource = new EventSource('http://localhost:8080/onibus/stream', { withCredentials: true })
-  console.log('SSE criado:', eventSource)
-  
-  eventSource.onopen = () => console.log('SSE conectado!')
+  // 🔥 Conexão SSE
+  eventSource = new EventSource('http://localhost:8080/onibus/stream')
 
   eventSource.onmessage = (event) => {
     let parsed: any
     try {
       parsed = JSON.parse(event.data)
-    } catch (err) {
-      console.error('Erro ao parsear event.data:', err, event.data)
+    } catch {
       return
     }
 
     const buses = Array.isArray(parsed) ? parsed : [parsed]
-    console.log('SSE buses (normalized array):', buses)
 
-    // --- só os primeiros 50 ---
-    const busesToShow = buses.slice(0, maxInitialMarkers)
+ const bounds = L.latLngBounds([])
+let visibleCount = 0
 
-    if (busesToShow.length === 0) return
+buses.forEach(bus => {
+  const key = String(bus.id)
+  const lat = Number(bus.latitude)
+  const lng = Number(bus.longitude)
 
-    const bounds = L.latLngBounds([])
+  if (!isFinite(lat) || !isFinite(lng)) return
 
-    busesToShow.forEach((bus: any) => {
-      const { id, linha, placa, latitude, longitude } = bus
-      const lat = Number(latitude)
-      const lng = Number(longitude)
+  const linha = bus.linha
 
-      if (!isFinite(lat) || !isFinite(lng)) {
-        console.warn('Ônibus com coordenadas inválidas', bus)
-        return
-      }
-
-      const key = String(id ?? `${lat},${lng}`)
-
-      if (!busMarkers[key]) {
-        const rotation = Number(bus.heading ?? bus.course ?? bus.bearing ?? 0)
-        const iconToUse = createBusSvgIcon({ color: '#1e90ff', size: 40, rotation })
-
-        const marker = L.marker([lat, lng], { icon: iconToUse }).addTo(map)
-        marker.bindPopup(`Linha: ${linha}<br>Placa: ${placa}`)
-        busMarkers[key] = marker
-        console.log('Marker criado:', key, lat, lng)
-      } else {
-        const rotation = Number(bus.heading ?? bus.course ?? bus.bearing ?? 0)
-        busMarkers[key].setIcon(createBusSvgIcon({ color: '#1e90ff', size: 40, rotation }))
-        busMarkers[key].setLatLng([lat, lng])
-        busMarkers[key].setPopupContent(`Linha: ${linha}<br>Placa: ${placa}`)
-      }
-
-      bounds.extend([lat, lng])
-    })
-
-    // Ajusta bounds apenas na primeira vez
-    if (!boundsAjustados && Object.keys(busMarkers).length > 0 && bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [50, 50] })
-      boundsAjustados = true
-      console.log('Bounds ajustados uma vez')
+  if (
+    activeRouteIds.value.length &&
+    !activeRouteIds.value.includes(linha)
+  ) {
+    if (busMarkersSSE[key]) {
+      map?.removeLayer(busMarkersSSE[key])
+      delete busMarkersSSE[key]
     }
-
-    console.log('Total markers no mapa:', Object.keys(busMarkers).length)
+    return
   }
 
-  eventSource.onerror = (err) => console.error('Erro SSE:', err)
+  visibleCount++
+  bounds.extend([lat, lng])
+
+  if (!busMarkersSSE[key]) {
+    const marker = L.marker([lat, lng], {
+      icon: createBusSvgIcon()
+    }).addTo(map!)
+
+    marker.bindPopup(`Linha: ${linha}`)
+    busMarkersSSE[key] = marker
+  } else {
+    busMarkersSSE[key].setLatLng([lat, lng])
+  }
 })
 
+// 🔥 Focar apenas uma vez após filtrar
+if (
+  shouldFocusOnFilter.value &&
+  visibleCount > 0 &&
+  bounds.isValid()
+) {
+  map?.fitBounds(bounds, { padding: [60, 60], maxZoom: 16 })
+  shouldFocusOnFilter.value = false
+}
+  }
+})
+
+// ======================================
+// Função chamada pelo formulário
+// ======================================
+async function fetchRouteBuses(start?: string, end?: string) {
+
+  if (!start && !end) {
+    activeRouteIds.value = []
+
+    shouldFocusOnFilter.value = true // opcional
+    
+    toast('Filtro aplicado com sucesso 🚌', {
+      type: TYPE.SUCCESS,
+      toastClassName: 'urban-success'
+    })
+
+    return
+  }
+
+  try {
+    const res = await fetch(
+      `http://localhost:8080/onibus/routes?start=${encodeURIComponent(start ?? '')}&end=${encodeURIComponent(end ?? '')}`
+    )
+
+    if (!res.ok) {
+      toast('Erro ao buscar rota ❌', {
+        type: TYPE.ERROR
+      })
+      return
+    }
+
+    const data: any[] = await res.json()
+
+    activeRouteIds.value = [
+      ...new Set(data.map(bus => bus.routeId))
+    ]
+
+    shouldFocusOnFilter.value = true
+
+    if (activeRouteIds.value.length === 0) {
+      toast('Nenhuma rota encontrada com esse filtro 🚫', {
+        type: TYPE.INFO,
+        toastClassName: 'urban-info'
+      })
+      return
+    }
+
+    toast(`Filtro aplicado! ${activeRouteIds.value.length} rotas encontradas 🚌`, {
+      type: TYPE.SUCCESS,
+      toastClassName: 'urban-success'
+    })
+
+  } catch (err) {
+    toast('Erro no servidor 🚨', {
+      type: TYPE.ERROR,
+      toastClassName: 'urban-error'
+    })
+  }
+}
+
+defineExpose({ fetchRouteBuses })
+
+// ======================================
 onBeforeUnmount(() => {
   if (eventSource) {
     eventSource.close()
     eventSource = null
-    console.log('SSE fechado')
   }
 })
 </script>
@@ -140,8 +195,6 @@ onBeforeUnmount(() => {
 <template>
   <div
     ref="mapContainer"
-    class="w-full h-[600px] rounded-xl shadow-lg border border-red-500"
-  >
-    <!-- Bordas vermelhas só para debug -->
-  </div>
+    class="w-full h-full rounded-xl shadow-lg"
+  ></div>
 </template>
