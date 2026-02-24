@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",
+    "axios": "^1.13.5",
     "leaflet": "^1.9.4",
     "lucide-vue-next": "^0.575.0",
     "mapbox-gl": "^3.18.1",

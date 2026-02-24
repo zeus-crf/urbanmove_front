@@ -3,6 +3,7 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useToast, TYPE } from 'vue-toastification'
+import axios from 'axios'
 
 const mapContainer = ref<HTMLDivElement | null>(null)
 let map: L.Map | null = null
@@ -132,7 +133,7 @@ async function fetchRouteBuses(start?: string, end?: string) {
 
     shouldFocusOnFilter.value = true // opcional
     
-    toast('Filtro aplicado com sucesso 🚌', {
+    toast('Filtro limpo com sucesso! 🚌', {
       type: TYPE.SUCCESS,
       toastClassName: 'urban-success'
     })
@@ -141,18 +142,16 @@ async function fetchRouteBuses(start?: string, end?: string) {
   }
 
   try {
-    const res = await fetch(
+    const { data } = await axios.get(
       `http://localhost:8080/onibus/routes?start=${encodeURIComponent(start ?? '')}&end=${encodeURIComponent(end ?? '')}`
     )
 
-    if (!res.ok) {
+    if (!data || !Array.isArray(data)) {
       toast('Erro ao buscar rota ❌', {
         type: TYPE.ERROR
       })
       return
     }
-
-    const data: any[] = await res.json()
 
     activeRouteIds.value = [
       ...new Set(data.map(bus => bus.routeId))
@@ -181,8 +180,28 @@ async function fetchRouteBuses(start?: string, end?: string) {
   }
 }
 
-defineExpose({ fetchRouteBuses })
+defineExpose({ fetchRouteBuses, clearMarkersNotInActiveRoutes })
 
+
+// Limpar markers de rotas filtradas quando o filtro é limpo
+function clearMarkersNotInActiveRoutes() {
+  Object.keys(busMarkersSSE).forEach(key => {
+    const marker = busMarkersSSE[key]
+    if (!marker) return
+    const popupContent = marker.getPopup()?.getContent() as string
+    const match = popupContent.match(/Linha: (\d+)/)
+    const linha = match ? match[1] : null
+
+    if (
+      linha &&
+      activeRouteIds.value.length &&
+      !activeRouteIds.value.includes(linha)
+    ) {
+      map?.removeLayer(marker)
+      delete busMarkersSSE[key]
+    }
+  })
+}
 // ======================================
 onBeforeUnmount(() => {
   if (eventSource) {
@@ -195,6 +214,12 @@ onBeforeUnmount(() => {
 <template>
   <div
     ref="mapContainer"
-    class="w-full h-full rounded-xl shadow-lg"
+    class="
+      absolute md:relative
+      inset-0
+      w-full
+      h-full
+      z-0
+    "
   ></div>
 </template>

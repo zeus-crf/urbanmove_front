@@ -1,1 +1,22 @@
 @import "tailwindcss";
+
+
+.urban-success {
+  background: #22c55e !important;
+  color: white !important;
+}
+
+.urban-info {
+  background: #1e90ff !important;
+  color: white !important;
+}
+
+.urban-warning {
+  background: #f59e0b !important;
+  color: black !important;
+}
+
+.urban-error {
+  background: #ef4444 !important;
+  color: white !important;
+}
